@@ -10,6 +10,15 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
+// CompressionConfig defines settings for conversation archiving and summarization.
+type CompressionConfig struct {
+	ChunkSizeTokens  int    `json:"chunk_size_tokens"  env:"PICOCLAW_COMPRESSION_CHUNK_SIZE_TOKENS"`
+	ContinuityBuffer int    `json:"continuity_buffer"  env:"PICOCLAW_COMPRESSION_CONTINUITY_BUFFER"`
+	MinChunkMessages int    `json:"min_chunk_messages" env:"PICOCLAW_COMPRESSION_MIN_CHUNK_MESSAGES"`
+	ColdStorageDir   string `json:"cold_storage_dir"   env:"PICOCLAW_COMPRESSION_COLD_STORAGE_DIR"`
+	SummaryMaxTokens int    `json:"summary_max_tokens" env:"PICOCLAW_COMPRESSION_SUMMARY_MAX_TOKENS"`
+}
+
 // rrCounter is a global counter for round-robin load balancing across models.
 var rrCounter atomic.Uint64
 
@@ -57,6 +66,7 @@ type Config struct {
 	Tools     ToolsConfig     `json:"tools"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
+	Compression CompressionConfig `json:"compression,omitempty"`
 }
 
 // MarshalJSON implements custom JSON marshaling for Config

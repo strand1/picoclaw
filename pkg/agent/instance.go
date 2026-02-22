@@ -1,12 +1,10 @@
 package agent
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -52,6 +50,15 @@ func NewAgentInstance(
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 
 	restrict := defaults.RestrictToWorkspace
+
+	// Initialize cold storage for this agent's workspace (before tool registration)
+	coldStorageDir := filepath.Join(workspace, cfg.Compression.ColdStorageDir)
+	cs, csErr := NewColdStorage(coldStorageDir)
+	if csErr != nil {
+		// Non-fatal: log the error, agent runs without archiving
+		cs = nil
+	}
+
 	toolsRegistry := tools.NewToolRegistry()
 	toolsRegistry.Register(tools.NewReadFileTool(workspace, restrict))
 	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict))
@@ -62,13 +69,13 @@ func NewAgentInstance(
 
 	// Register retrieve_chunk with a closure that reads from this agent's cold storage
 	if cs != nil {
-			toolsRegistry.Register(tools.NewRetrieveChunkTool(func(id string) (string, error) {
-					record, err := cs.LoadChunk(id)
-					if err != nil {
-							return "", err
-					}
-					return formatChunkTranscript(record), nil
-			}))
+		toolsRegistry.Register(tools.NewRetrieveChunkTool(func(id string) (string, error) {
+			record, err := cs.LoadChunk(id)
+			if err != nil {
+				return "", err
+			}
+			return formatChunkTranscript(record), nil
+		}))
 	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
@@ -111,14 +118,6 @@ func NewAgentInstance(
 	}
 	candidates := providers.ResolveCandidates(modelCfg, defaults.Provider)
 
-	// Initialize cold storage for this agent's workspace
-	coldStorageDir := filepath.Join(workspace, cfg.Compression.ColdStorageDir)
-	cs, csErr := NewColdStorage(coldStorageDir)
-	if csErr != nil {
-			// Non-fatal: log the error, agent runs without archiving
-			cs = nil
-	}
-	
 	return &AgentInstance{
 		ID:             agentID,
 		Name:           agentName,
