@@ -14,7 +14,7 @@ import (
 type Session struct {
 	Key      string              `json:"key"`
 	Messages []providers.Message `json:"messages"`
-	Summary  string              `json:"summary,omitempty"`
+	RollingSummary string        `json:"rolling_summary,omitempty"`
 	Created  time.Time           `json:"created"`
 	Updated  time.Time           `json:"updated"`
 }
@@ -100,7 +100,7 @@ func (sm *SessionManager) GetHistory(key string) []providers.Message {
 	return history
 }
 
-func (sm *SessionManager) GetSummary(key string) string {
+func (sm *SessionManager) GetRollingSummary(key string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -108,16 +108,16 @@ func (sm *SessionManager) GetSummary(key string) string {
 	if !ok {
 		return ""
 	}
-	return session.Summary
+	return session.RollingSummary
 }
 
-func (sm *SessionManager) SetSummary(key string, summary string) {
+func (sm *SessionManager) SetRollingSummary(key string, summary string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	session, ok := sm.sessions[key]
 	if ok {
-		session.Summary = summary
+		session.RollingSummary = summary
 		session.Updated = time.Now()
 	}
 }
@@ -179,7 +179,7 @@ func (sm *SessionManager) Save(key string) error {
 
 	snapshot := Session{
 		Key:     stored.Key,
-		Summary: stored.Summary,
+		RollingSummary: stored.RollingSummary,
 		Created: stored.Created,
 		Updated: stored.Updated,
 	}
