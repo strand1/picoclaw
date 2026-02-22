@@ -161,7 +161,8 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 
 func (cb *ContextBuilder) BuildMessages(
 	history []providers.Message,
-	summary string,
+    rollingSummary string,
+    chunkRefs []ChunkRef,
 	currentMessage string,
 	media []string,
 	channel, chatID string,
@@ -193,8 +194,20 @@ func (cb *ContextBuilder) BuildMessages(
 			"preview": preview,
 		})
 
-	if summary != "" {
-		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
+	if rollingSummary != "" || len(chunkRefs) > 0 {
+			var memSection strings.Builder
+			memSection.WriteString("\n\n## Memory\n")
+			if rollingSummary != "" {
+					memSection.WriteString("\n**Running summary:**\n")
+					memSection.WriteString(rollingSummary)
+			}
+			if len(chunkRefs) > 0 {
+					memSection.WriteString("\n\n**Archived chunks** (use `retrieve_chunk <id>` to load full messages):\n")
+					for _, ref := range chunkRefs {
+							fmt.Fprintf(&memSection, "- `%s`: %s\n", ref.ID, ref.Summary)
+					}
+			}
+			systemPrompt += memSection.String()
 	}
 
 	history = sanitizeHistoryForProvider(history)
