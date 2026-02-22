@@ -55,6 +55,7 @@ type Config struct {
 	ModelList []ModelConfig   `json:"model_list"` // New model-centric provider configuration
 	Gateway   GatewayConfig   `json:"gateway"`
 	Tools     ToolsConfig     `json:"tools"`
+	Compression CompressionConfig `json:"compression,omitempty"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 }
@@ -450,6 +451,15 @@ type CronToolsConfig struct {
 type ExecConfig struct {
 	EnableDenyPatterns bool     `json:"enable_deny_patterns" env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	CustomDenyPatterns []string `json:"custom_deny_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
+}
+
+// CompressionConfig controls the compress-and-archive memory system.
+type CompressionConfig struct {
+        ChunkSizeTokens  int    `json:"chunk_size_tokens"  env:"PICOCLAW_COMPRESSION_CHUNK_SIZE_TOKENS"`
+        ContinuityBuffer int    `json:"continuity_buffer"  env:"PICOCLAW_COMPRESSION_CONTINUITY_BUFFER"`
+        MinChunkMessages int    `json:"min_chunk_messages" env:"PICOCLAW_COMPRESSION_MIN_CHUNK_MESSAGES"`
+        ColdStorageDir   string `json:"cold_storage_dir"   env:"PICOCLAW_COMPRESSION_COLD_STORAGE_DIR"`
+        SummaryMaxTokens int    `json:"summary_max_tokens" env:"PICOCLAW_COMPRESSION_SUMMARY_MAX_TOKENS"`
 }
 
 type ToolsConfig struct {
