@@ -308,6 +308,13 @@ func DefaultConfig() *Config {
 			Enabled:  true,
 			Interval: 30,
 		},
+		Compression: CompressionConfig{
+				ChunkSizeTokens:  1200,
+				ContinuityBuffer: 4,
+				MinChunkMessages: 4,
+				ColdStorageDir:   "memory/chunks",
+				SummaryMaxTokens: 4096,
+		},
 		Devices: DevicesConfig{
 			Enabled:    false,
 			MonitorUSB: true,
