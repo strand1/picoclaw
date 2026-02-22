@@ -35,7 +35,6 @@ type AgentLoop struct {
 	registry       *AgentRegistry
 	state          *state.Manager
 	running        atomic.Bool
-	summarizing    sync.Map
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
 }
@@ -74,7 +73,6 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		cfg:         cfg,
 		registry:    registry,
 		state:       stateManager,
-		summarizing: sync.Map{},
 		fallback:    fallbackChain,
 	}
 }
@@ -404,14 +402,19 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message
-	var summary string
+	var rollingSummary string
+	var chunkRefs []ChunkRef
 	if !opts.NoHistory {
 		history = agent.Sessions.GetHistory(opts.SessionKey)
-		summary = agent.Sessions.GetSummary(opts.SessionKey)
+		rollingSummary = agent.Sessions.GetRollingSummary(opts.SessionKey)
+		if agent.ColdStorage != nil {
+				chunkRefs = agent.ColdStorage.ListRefs(opts.SessionKey)
+		}
 	}
 	messages := agent.ContextBuilder.BuildMessages(
 		history,
-		summary,
+		rollingSummary,
+		chunkRefs,
 		opts.UserMessage,
 		nil,
 		opts.Channel,
