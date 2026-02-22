@@ -1,12 +1,12 @@
 package agent
 
 import (
-        "os"
-        "path/filepath"
+        "context"
         "testing"
         "time"
 
         "github.com/sipeed/picoclaw/pkg/providers"
+        "github.com/sipeed/picoclaw/pkg/tools"
         "github.com/stretchr/testify/assert"
         "github.com/stretchr/testify/require"
 )
@@ -130,4 +130,48 @@ func TestFormatChunkTranscript(t *testing.T) {
         assert.Contains(t, result, expectedStart)
         assert.Contains(t, result, "user: Hello")
         assert.Contains(t, result, "assistant: Hi there")
+}
+
+// TestRetrieveChunkTool_Ephemeral verifies that retrieve_chunk tool results
+// are marked as ephemeral so they are not persisted to session history.
+func TestRetrieveChunkTool_Ephemeral(t *testing.T) {
+        tempDir := t.TempDir()
+        cs, err := NewColdStorage(tempDir)
+        require.NoError(t, err)
+
+        // Create a chunk to retrieve
+        record := ChunkRecord{
+                ID:         "abc12345",
+                SessionKey: "session1",
+                Summary:    "Test summary",
+                Messages: []providers.Message{
+                        {Role: "user", Content: "Hello"},
+                        {Role: "assistant", Content: "Hi there"},
+                },
+        }
+        err = cs.SaveChunk(record)
+        require.NoError(t, err)
+
+        // Create retrieve_chunk tool with closure
+        tool := tools.NewRetrieveChunkTool(func(id string) (string, error) {
+                r, err := cs.LoadChunk(id)
+                if err != nil {
+                        return "", err
+                }
+                return formatChunkTranscript(r), nil
+        })
+
+        // Execute tool
+        result := tool.Execute(context.Background(), map[string]any{"chunk_id": "abc12345"})
+
+        // Verify result is successful and contains transcript
+        require.NoError(t, result.Err)
+        assert.Contains(t, result.ForLLM, "Hello")
+        assert.Contains(t, result.ForLLM, "Hi there")
+
+        // Critical: result must be marked ephemeral
+        assert.True(t, result.Ephemeral, "retrieve_chunk result should be ephemeral")
+
+        // Also verify it's silent (not sent to user directly)
+        assert.True(t, result.Silent, "retrieve_chunk result should be silent")
 }

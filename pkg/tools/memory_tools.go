@@ -53,8 +53,9 @@ func (t *RetrieveChunkTool) Execute(_ context.Context, args map[string]any) *Too
         }
 
         return &ToolResult{
-                ForLLM: transcript,
-                // Silent=false so the agent sees the result.
+                ForLLM:     transcript,
+                Ephemeral:  true,  // Do not persist to session history
+                Silent:     true,  // Don't send to user directly
                 // Role=tool is assigned by the caller (loop.go).
         }
 }

@@ -30,6 +30,11 @@ type ToolResult struct {
 	// Err is the underlying error (not JSON serialized).
 	// Used for internal error handling and logging.
 	Err error `json:"-"`
+
+	// Ephemeral indicates that this tool result should NOT be persisted to session history.
+	// When true, the result is injected into the current LLM call but NOT saved via AddFullMessage.
+	// This is useful for retrieval tools that provide context without bloating permanent history.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // NewToolResult creates a basic ToolResult with content for the LLM.

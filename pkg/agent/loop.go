@@ -441,9 +441,9 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	agent.Sessions.AddMessage(opts.SessionKey, "assistant", finalContent)
 	agent.Sessions.Save(opts.SessionKey)
 
-	// 7. Optional: summarization
+	// 7. Optional: compress-and-archive
 	if opts.EnableSummary {
-		al.maybeSummarize(agent, opts.SessionKey, opts.Channel, opts.ChatID)
+		al.maybeCompress(agent, opts.SessionKey)
 	}
 
 	// 8. Optional: send response via bus
@@ -680,8 +680,10 @@ func (al *AgentLoop) runLLMIteration(
 			}
 			messages = append(messages, toolResultMsg)
 
-			// Save tool result message to session
-			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+			// Save tool result message to session (unless ephemeral)
+			if !toolResult.Ephemeral {
+				agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+			}
 		}
 	}
 
@@ -708,79 +710,169 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 	}
 }
 
-// maybeSummarize triggers summarization if the session history exceeds thresholds.
-func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, chatID string) {
-	newHistory := agent.Sessions.GetHistory(sessionKey)
-	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := agent.ContextWindow * 75 / 100
+// maybeCompress fires the compress-and-archive pipeline when the compressible
+// portion of history reaches the configured token threshold.
+func (al *AgentLoop) maybeCompress(agent *AgentInstance, sessionKey string) bool {
+	cfg := agent.CompressionCfg
+	history := agent.Sessions.GetHistory(sessionKey)
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
-		// Asynchronously summarize to avoid blocking
-		go func() {
-			if !constants.IsInternalChannel(channel) {
-				al.bus.PublishOutbound(bus.OutboundMessage{
-					Channel: channel,
-					ChatID:  chatID,
-					Content: "Memory threshold reached. Optimizing conversation history...",
-				})
-			}
-			al.summarizeSession(agent, sessionKey)
-		}()
+	keep := cfg.ContinuityBuffer
+	if keep <= 0 {
+		keep = 4
 	}
+
+	// Only the messages outside the continuity buffer are candidates for compression
+	if len(history) <= keep {
+		return false
+	}
+	compressible := history[:len(history)-keep]
+
+	// Thrash guard: need a minimum number of messages
+	minMsgs := cfg.MinChunkMessages
+	if minMsgs <= 0 {
+		minMsgs = 4
+	}
+	if len(compressible) < minMsgs {
+		return false
+	}
+
+	// Token check — only user+assistant messages count
+	tokenEstimate := al.estimateTokens(compressible)
+	threshold := cfg.ChunkSizeTokens
+	if threshold <= 0 {
+		threshold = 1000
+	}
+
+	logger.DebugCF("memory", "[MEMORY] Compression check",
+		map[string]any{
+			"session_key":         sessionKey,
+			"compressible_tokens": tokenEstimate,
+			"threshold":           threshold,
+			"msg_count":           len(compressible),
+		})
+
+	if tokenEstimate < threshold {
+		return false
+	}
+
+	logger.InfoCF("memory", "[MEMORY] Trigger fired",
+		map[string]any{
+			"session_key": sessionKey,
+			"tokens":      tokenEstimate,
+			"msg_count":   len(compressible),
+		})
+
+	al.compressGroup(agent, sessionKey, compressible, keep)
+	return true
 }
 
-// forceCompression aggressively reduces context when the limit is hit.
-// It drops the oldest 50% of messages (keeping system prompt and last user message).
-func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
-	history := agent.Sessions.GetHistory(sessionKey)
-	if len(history) <= 4 {
-		return
+// compressGroup summarizes and archives a set of compressible messages.
+func (al *AgentLoop) compressGroup(
+	agent *AgentInstance,
+	sessionKey string,
+	compressible []providers.Message,
+	keep int,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	cfg := agent.CompressionCfg
+
+	// Build summarization prompt from user+assistant messages only
+	var sb strings.Builder
+	sb.WriteString("Summarize the following conversation segment. Be specific and preserve key facts, decisions, and context.\n\nCONVERSATION:\n")
+	for _, m := range compressible {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
 	}
 
-	// Keep system prompt (usually [0]) and the very last message (user's trigger)
-	// We want to drop the oldest half of the *conversation*
-	// Assuming [0] is system, [1:] is conversation
-	conversation := history[1 : len(history)-1]
-	if len(conversation) == 0 {
-		return
+	maxTokens := cfg.SummaryMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
 	}
 
-	// Helper to find the mid-point of the conversation
-	mid := len(conversation) / 2
-
-	// New history structure:
-	// 1. System Prompt (with compression note appended)
-	// 2. Second half of conversation
-	// 3. Last message
-
-	droppedCount := mid
-	keptConversation := conversation[mid:]
-
-	newHistory := make([]providers.Message, 0)
-
-	// Append compression note to the original system prompt instead of adding a new system message
-	// This avoids having two consecutive system messages which some APIs (like Zhipu) reject
-	compressionNote := fmt.Sprintf(
-		"\n\n[System Note: Emergency compression dropped %d oldest messages due to context limit]",
-		droppedCount,
+	resp, err := agent.Provider.Chat(
+		ctx,
+		[]providers.Message{{Role: "user", Content: sb.String()}},
+		nil,
+		agent.Model,
+		map[string]any{
+			"max_tokens":  maxTokens,
+			"temperature": 0.3,
+		},
 	)
-	enhancedSystemPrompt := history[0]
-	enhancedSystemPrompt.Content = enhancedSystemPrompt.Content + compressionNote
-	newHistory = append(newHistory, enhancedSystemPrompt)
+	if err != nil {
+		logger.ErrorCF("memory", "[MEMORY] Summarization failed", map[string]any{"error": err.Error()})
+		return
+	}
 
-	newHistory = append(newHistory, keptConversation...)
-	newHistory = append(newHistory, history[len(history)-1]) // Last message
+	chunkSummary := resp.Content
+	logger.InfoCF("memory", "[MEMORY] Chunk summary complete", map[string]any{
+		"session_key":   sessionKey,
+		"summary_chars": len(chunkSummary),
+	})
 
-	// Update session
-	agent.Sessions.SetHistory(sessionKey, newHistory)
+	// Archive messages (user+assistant only — no tool messages)
+	archiveMessages := make([]providers.Message, 0, len(compressible))
+	for _, m := range compressible {
+		if m.Role == "user" || m.Role == "assistant" {
+			archiveMessages = append(archiveMessages, m)
+		}
+	}
+
+	var chunkID string
+	archived := false
+	if agent.ColdStorage != nil {
+		chunkID = agent.ColdStorage.NextChunkID(sessionKey)
+		record := ChunkRecord{
+			ID:         chunkID,
+			SessionKey: sessionKey,
+			MsgRange:   [2]int{0, len(archiveMessages)},
+			CreatedAt:  time.Now(),
+			Summary:    chunkSummary,
+			Messages:   archiveMessages,
+		}
+		if saveErr := agent.ColdStorage.SaveChunk(record); saveErr != nil {
+			logger.ErrorCF("memory", "[MEMORY] Failed to save chunk — history NOT truncated",
+				map[string]any{"chunk_id": chunkID, "error": saveErr.Error()})
+			return // abort: do not truncate, do not update rolling summary
+		}
+		archived = true
+		logger.InfoCF("memory", "[MEMORY] Chunk archived",
+			map[string]any{"chunk_id": chunkID, "session_key": sessionKey})
+	}
+
+	if !archived {
+		return // no cold storage configured — skip truncation
+	}
+
+	// Append summary entry to rolling log
+	timestamp := time.Now().Format("2006-01-02 15:04")
+	entry := fmt.Sprintf("[%s]\n%s", timestamp, chunkSummary)
+	existing := agent.Sessions.GetRollingSummary(sessionKey)
+	if existing != "" {
+		entry = existing + "\n\n" + entry
+	}
+	agent.Sessions.SetRollingSummary(sessionKey, entry)
+
+	// Truncate history — keep only the continuity buffer
+	history := agent.Sessions.GetHistory(sessionKey)
+	if len(history) > keep {
+		agent.Sessions.SetHistory(sessionKey, history[len(history)-keep:])
+	}
+
 	agent.Sessions.Save(sessionKey)
 
-	logger.WarnCF("agent", "Forced compression executed", map[string]any{
-		"session_key":  sessionKey,
-		"dropped_msgs": droppedCount,
-		"new_count":    len(newHistory),
-	})
+	logger.InfoCF("memory", "[MEMORY] Compression complete",
+		map[string]any{
+			"session_key": sessionKey,
+			"chunk_id":    chunkID,
+			"kept_msgs":   keep,
+		})
 }
+
 
 // GetStartupInfo returns information about loaded tools and skills for logging.
 func (al *AgentLoop) GetStartupInfo() map[string]any {
@@ -861,129 +953,19 @@ func formatToolsForLog(toolDefs []providers.ToolDefinition) string {
 	return sb.String()
 }
 
-// summarizeSession summarizes the conversation history for a session.
-func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
 
-	history := agent.Sessions.GetHistory(sessionKey)
-	summary := agent.Sessions.GetRollingSummary(sessionKey)
-
-	// Keep last 4 messages for continuity
-	if len(history) <= 4 {
-		return
-	}
-
-	toSummarize := history[:len(history)-4]
-
-	// Oversized Message Guard
-	maxMessageTokens := agent.ContextWindow / 2
-	validMessages := make([]providers.Message, 0)
-	omitted := false
-
-	for _, m := range toSummarize {
-		if m.Role != "user" && m.Role != "assistant" {
-			continue
-		}
-		msgTokens := len(m.Content) / 2
-		if msgTokens > maxMessageTokens {
-			omitted = true
-			continue
-		}
-		validMessages = append(validMessages, m)
-	}
-
-	if len(validMessages) == 0 {
-		return
-	}
-
-	// Multi-Part Summarization
-	var finalSummary string
-	if len(validMessages) > 10 {
-		mid := len(validMessages) / 2
-		part1 := validMessages[:mid]
-		part2 := validMessages[mid:]
-
-		s1, _ := al.summarizeBatch(ctx, agent, part1, "")
-		s2, _ := al.summarizeBatch(ctx, agent, part2, "")
-
-		mergePrompt := fmt.Sprintf(
-			"Merge these two conversation summaries into one cohesive summary:\n\n1: %s\n\n2: %s",
-			s1,
-			s2,
-		)
-		resp, err := agent.Provider.Chat(
-			ctx,
-			[]providers.Message{{Role: "user", Content: mergePrompt}},
-			nil,
-			agent.Model,
-			map[string]any{
-				"max_tokens":  1024,
-				"temperature": 0.3,
-			},
-		)
-		if err == nil {
-			finalSummary = resp.Content
-		} else {
-			finalSummary = s1 + " " + s2
-		}
-	} else {
-		finalSummary, _ = al.summarizeBatch(ctx, agent, validMessages, summary)
-	}
-
-	if omitted && finalSummary != "" {
-		finalSummary += "\n[Note: Some oversized messages were omitted from this summary for efficiency.]"
-	}
-
-	if finalSummary != "" {
-		agent.Sessions.SetRollingSummary(sessionKey, finalSummary)
-		agent.Sessions.TruncateHistory(sessionKey, 4)
-		agent.Sessions.Save(sessionKey)
-	}
-}
-
-// summarizeBatch summarizes a batch of messages.
-func (al *AgentLoop) summarizeBatch(
-	ctx context.Context,
-	agent *AgentInstance,
-	batch []providers.Message,
-	existingSummary string,
-) (string, error) {
-	var sb strings.Builder
-	sb.WriteString("Provide a concise summary of this conversation segment, preserving core context and key points.\n")
-	if existingSummary != "" {
-		sb.WriteString("Existing context: ")
-		sb.WriteString(existingSummary)
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\nCONVERSATION:\n")
-	for _, m := range batch {
-		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
-	}
-	prompt := sb.String()
-
-	response, err := agent.Provider.Chat(
-		ctx,
-		[]providers.Message{{Role: "user", Content: prompt}},
-		nil,
-		agent.Model,
-		map[string]any{
-			"max_tokens":  1024,
-			"temperature": 0.3,
-		},
-	)
-	if err != nil {
-		return "", err
-	}
-	return response.Content, nil
-}
 
 // estimateTokens estimates the number of tokens in a message list.
 // Uses a safe heuristic of 2.5 characters per token to account for CJK and other
 // overheads better than the previous 3 chars/token.
+// Only user and assistant messages are counted; tool messages are excluded as they
+// can be very large (file reads, web fetches) and don't represent conversation context.
 func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
 	totalChars := 0
 	for _, m := range messages {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
 		totalChars += utf8.RuneCountInString(m.Content)
 	}
 	// 2.5 chars per token = totalChars * 2 / 5
