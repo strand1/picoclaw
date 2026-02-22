@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -31,6 +34,8 @@ type AgentInstance struct {
 	Subagents      *config.SubagentsConfig
 	SkillsFilter   []string
 	Candidates     []providers.FallbackCandidate
+	ColdStorage    *ColdStorage
+    CompressionCfg config.CompressionConfig
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -54,6 +59,17 @@ func NewAgentInstance(
 	toolsRegistry.Register(tools.NewExecToolWithConfig(workspace, restrict, cfg))
 	toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict))
 	toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict))
+
+	// Register retrieve_chunk with a closure that reads from this agent's cold storage
+	if cs != nil {
+			toolsRegistry.Register(tools.NewRetrieveChunkTool(func(id string) (string, error) {
+					record, err := cs.LoadChunk(id)
+					if err != nil {
+							return "", err
+					}
+					return formatChunkTranscript(record), nil
+			}))
+	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessionsManager := session.NewSessionManager(sessionsDir)
@@ -95,6 +111,14 @@ func NewAgentInstance(
 	}
 	candidates := providers.ResolveCandidates(modelCfg, defaults.Provider)
 
+	// Initialize cold storage for this agent's workspace
+	coldStorageDir := filepath.Join(workspace, cfg.Compression.ColdStorageDir)
+	cs, csErr := NewColdStorage(coldStorageDir)
+	if csErr != nil {
+			// Non-fatal: log the error, agent runs without archiving
+			cs = nil
+	}
+	
 	return &AgentInstance{
 		ID:             agentID,
 		Name:           agentName,
@@ -112,6 +136,8 @@ func NewAgentInstance(
 		Subagents:      subagents,
 		SkillsFilter:   skillsFilter,
 		Candidates:     candidates,
+		ColdStorage:    cs,
+        CompressionCfg: cfg.Compression,
 	}
 }
 
@@ -156,4 +182,14 @@ func expandHome(path string) string {
 		return home
 	}
 	return path
+}
+
+// formatChunkTranscript formats a ChunkRecord as a readable transcript for the LLM.
+func formatChunkTranscript(record *ChunkRecord) string {
+        var sb strings.Builder
+        fmt.Fprintf(&sb, "[Archived chunk %s — %s]\n\n", record.ID, record.CreatedAt.Format("2006-01-02 15:04"))
+        for _, msg := range record.Messages {
+                fmt.Fprintf(&sb, "%s: %s\n\n", msg.Role, msg.Content)
+        }
+        return sb.String()
 }
