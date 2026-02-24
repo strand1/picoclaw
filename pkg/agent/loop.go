@@ -780,7 +780,7 @@ func (al *AgentLoop) compressGroup(
 
 	// Build summarization prompt from user+assistant messages only
 	var sb strings.Builder
-	sb.WriteString("Summarize the following conversation segment. Be specific and preserve key facts, decisions, and context.\n\nCONVERSATION:\n")
+	sb.WriteString("Summarize the following conversation in 1-3 plain sentences. No bullet points, headers, or markdown. Preserve key facts, filenames, decisions, and numbers. Omit filler and pleasantries. Remove stopwords. \n\nCONVERSATION:\n")
 	for _, m := range compressible {
 		if m.Role != "user" && m.Role != "assistant" {
 			continue
